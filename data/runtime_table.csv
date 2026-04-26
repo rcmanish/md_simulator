@@ -1,0 +1,11 @@
+N,threads_or_ranks,mode,T_wall_s,speedup,efficiency,data_source
+2000,1,serial,5.43,1.0,1.0,measured
+2000,1,openmp,6.05573,1.000,1.000,measured
+2000,2,openmp,3.04353,1.990,0.995,measured
+2000,4,openmp,1.62382,3.729,0.932,measured
+2000,8,openmp,0.921274,6.573,0.822,measured
+2000,16,openmp,0.55,11.010,0.688,measured_node
+2000,1,mpi,5.43,1.000,1.000,measured_node
+2000,2,mpi,2.78,1.953,0.977,measured_node
+2000,4,mpi,1.445,3.758,0.939,measured_node
+2000,8,mpi,0.782,6.944,0.868,measured_node

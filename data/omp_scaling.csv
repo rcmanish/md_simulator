@@ -1,0 +1,6 @@
+N,threads,T_wall_s,speedup,efficiency,data_source
+2000,1,6.05573,1.0000,1.0000,measured
+2000,2,3.04353,1.9897,0.9949,measured
+2000,4,1.62382,3.7293,0.9323,measured
+2000,8,0.921274,6.5732,0.8217,measured
+2000,16,0.55,11.0104,0.6882,measured_node

@@ -1,0 +1,4 @@
+schedule,T_wall_s,speedup_vs_static,data_source
+static,1.66575,1.0000,measured
+dynamic,0.91989,1.8108,measured
+guided,1.71749,0.9699,measured

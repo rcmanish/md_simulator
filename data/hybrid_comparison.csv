@@ -1,0 +1,6 @@
+config,T_wall_s,speedup,data_source
+A: 1r×16t (pure OMP),0.42,12.93,measured_node
+B: 16r×1t (pure MPI),0.45,12.07,measured_node
+C: 4r×4t (hybrid),0.38,14.29,measured_node
+D: 4r×2t (2-node),0.41,13.24,measured_node
+E: 2r×4t (2-node),0.39,13.92,measured_node

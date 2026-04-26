@@ -1,0 +1,5 @@
+N,ranks,T_wall_s,speedup,efficiency,data_source
+2000,1,5.43,1.0000,1.0000,measured_node
+2000,2,2.78,1.9532,0.9766,measured_node
+2000,4,1.445,3.7578,0.9394,measured_node
+2000,8,0.782,6.9437,0.8680,measured_node

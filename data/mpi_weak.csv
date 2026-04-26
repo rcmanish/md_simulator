@@ -1,0 +1,5 @@
+ranks,N,T_wall_s,efficiency_weak,data_source
+1,500,1.362,1.0000,measured_node
+2,1000,1.445,0.9426,measured_node
+4,2000,1.598,0.8523,measured_node
+8,4000,1.823,0.7471,measured_node
