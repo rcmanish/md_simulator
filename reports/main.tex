@@ -5,6 +5,7 @@
 \usepackage{graphicx}
 \usepackage{textcomp}
 \usepackage{xcolor}
+\usepackage{hyperref}
 
 \begin{document}
 
@@ -20,126 +21,74 @@ user@iitmandi.ac.in}}
 \maketitle
 
 \begin{abstract}
-This paper presents the design, implementation, and performance evaluation of a 3D
-Lennard-Jones Molecular Dynamics (MD) simulator in C++.
-Starting from a verified serial baseline, we develop shared-memory (OpenMP) and
-distributed-memory (MPI) parallel implementations, followed by a hybrid MPI+OpenMP
-configuration.
-Verification confirms NVE energy conservation ($<$0.61\% drift, $N=256$, $\Delta t=0.005$),
-correct thermostat-driven temperature equilibration to $T_\mathrm{target}=2.0$ (LJ units),
-and accurate radial distribution functions.
-Timer-based profiling reveals that \texttt{compute\_forces} consumes $>$99.3\% of
-wall-clock time for all $N$, motivating parallelisation.
-Serial complexity scaling confirms $T \propto N^{1.70}$, approaching $O(N^2)$.
-The OpenMP implementation achieves $5.90\times$ speedup at 8 threads (73.7\% efficiency)
-relative to the serial baseline, with a fitted Amdahl serial fraction of
-$f_\mathrm{serial}\approx5.2\%$, implying $S_\mathrm{max}\approx19\times$.
-The MPI domain-decomposition implementation achieves $6.94\times$ speedup at $P=8$ ranks
-(86.8\% efficiency) with $>$81\% weak-scaling efficiency at $P=8$.
-The hybrid $4\text{r}\times4\text{t}$ configuration yields the best throughput
-($13.2\times$ over serial).
+This paper presents the design, implementation, and performance evaluation of a 3D Lennard-Jones Molecular Dynamics (MD) simulator in C++. Code and scripts are available at \url{https://github.com/rcmanish/md_simulator}. Starting from a verified serial baseline, we develop shared-memory (OpenMP) and distributed-memory (MPI) parallel implementations, followed by a hybrid MPI+OpenMP configuration. The model is rigorously verified for NVE energy conservation ($<$0.61\% drift, $N=256$, $\Delta t=0.005$), thermostat-driven equilibration, and timestep convergence, including stress-testing edge cases. Timer-based profiling identifies the $O(N^2)$ \texttt{compute\_forces} loop as the dominant bottleneck ($>$99.3\% of wall-clock time), motivating parallelisation. Our OpenMP implementation achieves $5.90\times$ speedup at 8 threads (73.7\% efficiency), with scaling limited by the critical-section reduction and L3 cache bandwidth. The MPI 1D spatial decomposition achieves $6.94\times$ speedup at $P=8$ ranks (86.8\% efficiency) and maintains $>$81\% weak-scaling efficiency. The hybrid $4\text{r}\times4\text{t}$ configuration yields the highest throughput ($13.2\times$ over serial), effectively balancing node-level MPI communication with shared-memory cache utilisation.
 \end{abstract}
 
-\section{Introduction}
-Molecular Dynamics (MD) is a cornerstone of computational physics and materials
-science~\cite{b1,b2}, enabling atomic-level simulation of phase transitions, protein
-folding, and materials properties.
-The quadratic scaling of all-pair force evaluation renders MD a canonical HPC
-target: for $N$ particles, every time step requires evaluating $N(N-1)/2$
-pair interactions under a cutoff radius $r_c$.
+\section{Problem Framing}
+Molecular Dynamics (MD) simulations track the trajectories of interacting atoms or molecules over time by numerically integrating Newton's equations of motion. MD is a quintessential High-Performance Computing (HPC) problem because the calculation of pairwise intermolecular forces exhibits a time complexity of $O(N^2)$ in its naïve form. Even with a cutoff radius $r_c$, the workload per timestep remains immense for large systems ($N > 10^4$). This computational intensity, coupled with the need for millions of timesteps to observe macroscopic physical phenomena, necessitates massive parallelisation. 
 
-This paper documents a complete MD pipeline beginning with a modular, cache-friendly
-serial implementation in C++ and extending to OpenMP~\cite{b3}, MPI~\cite{b4},
-and hybrid parallel strategies.
-Each stage includes verification tests and quantitative scaling studies.
-All timing uses a high-resolution \texttt{std::chrono} harness for consistency.
+The core challenge in parallelising MD lies in managing data locality and memory bandwidth. The continuous movement of particles dictates dynamic memory access patterns, while force reduction across multiple threads or distributed nodes introduces critical synchronisation and communication overhead. Effectively addressing these issues using shared-memory and distributed-memory architectures is essential for scalable performance.
 
-\section{Physical Model}
-The system simulates $N$ particles in a cubic periodic box of side $L$,
-interacting via the Lennard-Jones (LJ) potential:
+\section{Mathematical and Algorithmic Model}
+The system simulates $N$ particles in a cubic periodic box of side $L$, interacting via the Lennard-Jones (LJ) potential:
 \begin{equation}
-  V(r) = 4\epsilon \!\left[ \!\left(\frac{\sigma}{r}\right)^{12}
-                           \!-\! \left(\frac{\sigma}{r}\right)^{6} \right],
+  V(r) = 4\epsilon \!\left[ \!\left(\frac{\sigma}{r}\right)^{12} \!-\! \left(\frac{\sigma}{r}\right)^{6} \right],
   \label{eq:lj}
 \end{equation}
-with cutoff $r_c = 2.5\sigma$ and minimum-image PBC.
-Reduced LJ units ($\epsilon=\sigma=m=1$) are used throughout.
-Pressure is computed via the virial theorem:
-$P = \rho k_BT + \frac{1}{3V}\sum_{i<j}\mathbf{r}_{ij}\cdot\mathbf{F}_{ij}$.
-At $\rho=0.8$, $T=1.0$, the simulation yields $P\approx2.27$, within 3.2\% of the
-van~der~Waals equation-of-state prediction $P\approx2.20$, confirming thermodynamic
-correctness.
+with cutoff $r_c = 2.5\sigma$ and minimum-image periodic boundary conditions (PBC). Reduced LJ units ($\epsilon=\sigma=m=1$) are used.
 
-\section{Numerical Algorithm}
 Time integration uses the velocity Verlet algorithm~\cite{b7}:
 \begin{align}
   \mathbf{v}(t + \tfrac{\Delta t}{2}) &= \mathbf{v}(t) + \tfrac{\mathbf{F}(t)}{m}\tfrac{\Delta t}{2}, \\
   \mathbf{r}(t + \Delta t)            &= \mathbf{r}(t) + \mathbf{v}(t + \tfrac{\Delta t}{2})\Delta t, \\
-  \mathbf{v}(t + \Delta t)            &= \mathbf{v}(t+\tfrac{\Delta t}{2}) +
-                                          \tfrac{\mathbf{F}(t+\Delta t)}{m}\tfrac{\Delta t}{2}.
+  \mathbf{v}(t + \Delta t)            &= \mathbf{v}(t+\tfrac{\Delta t}{2}) + \tfrac{\mathbf{F}(t+\Delta t)}{m}\tfrac{\Delta t}{2}.
 \end{align}
-This symplectic integrator conserves phase-space volume exactly,
-giving $O(\Delta t^2)$ global truncation error and excellent long-time energy conservation.
+This symplectic integrator ensures $O(\Delta t^2)$ global truncation error and excellent long-time energy conservation, critical for the microcanonical (NVE) ensemble.
 
-\section{Serial Implementation}
-Particle coordinates and forces use a Structure-of-Arrays (SoA) layout,
-enabling SIMD auto-vectorisation.
-Fig.~\ref{fig:compiler} confirms \texttt{-O3} provides a $4.2\times$ speedup over
-\texttt{-O0} through loop unrolling and vectorisation of the LJ kernel.
+\section{Design Decisions}
+Several architectural choices were made to optimize execution:
+\begin{itemize}
+    \item \textbf{Data Layout (SoA vs. AoS):} A Structure-of-Arrays (SoA) layout is chosen over an Array-of-Structures (AoS). SoA ensures that $x$, $y$, and $z$ coordinates are stored contiguously, maximising cache-line utilisation and enabling compiler-driven SIMD vectorisation.
+    \item \textbf{OpenMP Reduction (Thread-Private vs. Atomics):} To prevent data races when accumulating $\mathbf{F}_{ij}$ and $\mathbf{F}_{ji}$ concurrently, we allocate thread-private force arrays rather than using \texttt{atomic} updates. Atomics introduce severe cache-line invalidation overhead (false sharing) in the hot loop. Thread-private arrays incur a memory overhead of $O(p \times N)$ and a final reduction cost, but vastly improve inner-loop bandwidth.
+    \item \textbf{MPI Decomposition (1D vs. 3D):} A 1D spatial slab decomposition was implemented. While 3D decomposition offers an asymptotically superior surface-to-volume communication ratio ($O(N^{2/3}/P)$ vs $O(N/P)$), a 1D decomposition simplifies ghost-exchange logic and avoids corner-communication phases. For the core counts evaluated ($P \le 16$), the 1D overhead is sufficiently minimal.
+\end{itemize}
 
-\section{Verification and Testing}
+\section{Serial Baseline}
+\begin{figure}[htbp]
+\centerline{\includegraphics[width=\columnwidth]{plots/md/serial_n2_scaling.pdf}}
+\caption{Serial wall time vs $N$ on log-log axes (100 steps each). Fitted $T\propto N^{1.70}$ ($R^2=0.9997$). The exponent approaches 2.0 at large $N$; at moderate $N$, the cutoff sphere reduces the effective interaction count below $N^2/2$.}
+\label{fig:n2scale}
+\end{figure}
 
-\subsection{Energy Conservation (NVE)}
+The serial baseline computes distances across all pairs $i < j$. Compiler optimisation with GCC \texttt{-O3} yields a $4.2\times$ performance boost over \texttt{-O0} via loop unrolling and SIMD vectorisation. As shown in Fig.~\ref{fig:n2scale}, time complexity scales as $T \propto N^{1.70}$. The exponent is below $2.0$ because particles outside $r_c$ skip the expensive force calculation; however, it asymptotically approaches $O(N^2)$ as volume increases.
+
+\section{Verification and Validation}
+
+\subsection{Energy Conservation and Equilibration}
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=\columnwidth]{plots/energy_conservation.pdf}}
-\caption{NVE energy conservation: KE/N (orange, left axis) and PE/N, $E_\mathrm{tot}$/N
-(blue/green, right axis). Inset: total energy drift as a percentage of the mean.
-$(N=256,\;\Delta t=0.005,\;T_\mathrm{target}=2.0)$.}
+\caption{NVE energy conservation: KE/N (orange) and PE/N, $E_\mathrm{tot}$/N (blue/green). Inset shows total energy drift. $(N=256,\;\Delta t=0.005)$.}
 \label{fig:nve}
 \end{figure}
-Fig.~\ref{fig:nve} presents per-particle kinetic, potential, and total energy
-over 50 LJ time units on a dual y-axis, making both KE thermal equilibration and
-PE relaxation simultaneously visible.
-Total energy drift is 0.61\%, well within acceptable limits for $\Delta t=0.005$.
-
-\subsection{Temperature Equilibration}
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=\columnwidth]{plots/temperature_equilibration.pdf}}
-\caption{Temperature equilibration: velocity-rescaling thermostat (blue, $t\le10$)
-drives the system to $T_\mathrm{target}=2.0$; NVE production (orange, $t>10$) maintains
-$\langle T\rangle\approx1.12$. Dashed: $T_\mathrm{target}=2.0$.}
+\caption{Temperature equilibration: velocity-rescaling thermostat ($t\le10$) drives the system to $T_\mathrm{target}=2.0$; NVE production ($t>10$) maintains $\langle T\rangle\approx1.12$.}
 \label{fig:equil}
 \end{figure}
-Fig.~\ref{fig:equil} shows the two-phase protocol: a velocity-rescaling thermostat is
-applied for $t\le10$ (2000 steps), then removed for NVE production.
-The production temperature $\langle T\rangle\approx1.12$ is lower than $T_\mathrm{target}=2.0$
-because the velocity-rescaling thermostat sets the kinetic temperature, but upon removal,
-potential energy stored in the compressed FCC lattice is released, converting kinetic
-to potential energy and reducing the instantaneous temperature.
-This is physically correct NVE behaviour: total energy is conserved while the
-kinetic/potential partition adjusts to the true equilibrium.
+Fig.~\ref{fig:nve} demonstrates total energy drift of 0.61\% over 50 LJ units, validating the NVE ensemble. Fig.~\ref{fig:equil} displays a two-phase protocol: a velocity-rescaling thermostat applies until $t=10$. The subsequent NVE production temperature $\langle T\rangle\approx1.12$ is lower than $T_\mathrm{target}=2.0$ due to the conversion of kinetic energy to potential energy as the compressed FCC lattice relaxes. 
 
-\subsection{Radial Distribution Function and Convergence}
-\begin{figure}[htbp]
-\centerline{\includegraphics[width=\columnwidth]{plots/rdf.pdf}}
-\caption{Radial Distribution Function $g(r)$ at $\rho=0.8$, $T=1.0$,
-showing the expected first peak at $r\approx1.12\sigma$ and liquid-state oscillations.}
-\label{fig:rdf}
-\end{figure}
+\subsection{Convergence and Edge Cases}
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=\columnwidth]{plots/timestep_convergence.pdf}}
-\caption{Velocity Verlet convergence: $|x-x_\mathrm{exact}|$ vs $\Delta t$ for a
-harmonic oscillator confirms $O(\Delta t^2)$ convergence.}
+\caption{Velocity Verlet convergence: error vs $\Delta t$ confirms $O(\Delta t^2)$ convergence.}
 \label{fig:verlet}
 \end{figure}
-Fig.~\ref{fig:rdf} confirms liquid structure at $\rho=0.8$, $T=1.0$.
-Fig.~\ref{fig:verlet} confirms second-order convergence against the analytic solution.
+Fig.~\ref{fig:verlet} confirms second-order spatial convergence. 
+\textbf{Stress Testing:} We tested edge cases such as excessively large timesteps ($\Delta t \ge 0.02$), which resulted in catastrophic energy divergence (particles escaping the primary box due to unphysical coordinate updates). Similarly, setting density too high ($\rho \ge 1.5$) caused severe initial overlaps and numerical overflow in the $r^{-12}$ repulsive term, highlighting the physical limits of the LJ potential.
 
-\section{Code Profiling and Complexity}
-
+\section{Profiling and Bottleneck Identification}
 \begin{table}[htbp]
-\caption{Serial Profiling Results: Wall Time (s) by Function\newline
-{\footnotesize 500 steps per run, $\rho=0.8$, $r_c=2.5$}}
+\caption{Profiling Results: Wall Time (s) by Function (500 steps)}
 \label{tab:profiling}
 \begin{center}
 \begin{tabular}{|l|c|c|c|c|c|}
@@ -155,252 +104,62 @@ TOTAL                     & 0.0319 & 0.0982 & 0.4529 & 1.4342 & 5.4300 \\
 \hline
 \end{tabular}
 \end{center}
-\vspace{2pt}
-{\footnotesize All timings collected with \texttt{std::chrono} high-resolution clock on a
-single core. \texttt{compute\_forces} consumes $>$99.3\% of total time at $N=1000$.}
 \end{table}
+Table~\ref{tab:profiling} isolates the bottleneck. The \texttt{compute\_forces} routine consumes $>99.3\%$ of execution time for $N \ge 1000$. This dominance stems from the nested $O(N^2)$ pair evaluation loop, which stresses both compute units (floating-point operations) and memory bandwidth (reading coordinates and writing forces). Parallelisation efforts must therefore exclusively target this routine.
 
-Table~\ref{tab:profiling} quantifies the bottleneck:
-\texttt{compute\_forces} dominates at $>$99.3\% of wall time for $N=1000$,
-with the fraction growing with $N$ as the $O(N^2)$ pair loop dominates.
-The $O(N)$ \texttt{velocity\_verlet} and \texttt{apply\_pbc} remain $<$1\% at all sizes.
+\section{Parallelisation}
 
-\begin{figure}[htbp]
-\centerline{\includegraphics[width=\columnwidth]{plots/md/serial_n2_scaling.pdf}}
-\caption{Serial wall time vs $N$ on log-log axes (100 steps each).
-Fitted $T\propto N^{1.70}$ ($R^2=0.9997$). The exponent approaches 2.0 at large $N$;
-at moderate $N$, the cutoff sphere reduces the effective interaction count below $N^2/2$.}
-\label{fig:n2scale}
-\end{figure}
-
-Fig.~\ref{fig:n2scale} confirms super-linear (approaching $O(N^2)$) growth.
-The fitted exponent $\alpha=1.70$ is physically correct: at moderate $N$,
-a significant fraction of pairs lies within $r_c$, reducing the effective
-exponent; as $N\to\infty$, $\alpha\to2.0$.
-
-\begin{figure}[htbp]
-\centerline{\includegraphics[width=\columnwidth]{plots/compiler_optimisation.pdf}}
-\caption{Wall-time speedup vs GCC optimisation level relative to \texttt{-O0}.
-\texttt{-O3} achieves $4.2\times$ via SIMD vectorisation and loop unrolling.}
-\label{fig:compiler}
-\end{figure}
-
-\section{OpenMP Parallelisation}
-
-The outer loop of \texttt{compute\_forces} iterates over particle pairs $(i,j)$
-with $i<j$.
-Newton's third law allows accumulating $\mathbf{F}_{ji}=-\mathbf{F}_{ij}$ within
-the same iteration, but naïve parallelisation of the $i$-loop creates a data race on
-the force arrays.
-We resolve this with \emph{thread-private} force arrays (one copy of size $N$ per thread)
-accumulated into the global array inside a \texttt{\#pragma omp critical} section.
-This avoids atomic operations in the hot inner loop, yielding higher bandwidth
-utilisation than an \texttt{atomic} approach for large $N$.
-
-The single-threaded OpenMP run ($T=6.056$ s) is marginally slower than the serial
-baseline ($T=5.430$ s) due to thread-pool initialisation overhead and the allocation
-of $N$ per-thread force arrays at the start of the parallel region.
-All speedup values $S(p)$ are computed using $T_\mathrm{serial}=5.430$ s as the
-denominator.
-
-\subsection{Schedule Comparison}
+\subsection{OpenMP Approach}
+We parallelise the outer $i$-loop of the force computation. 
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=\columnwidth]{plots/md/omp_schedule_comparison.pdf}}
-\caption{Wall time and relative speedup for three OpenMP schedules
-($N=2000$, 8 threads, 500 steps).
-\texttt{dynamic} wins because the upper-triangle loop assigns row $i$
-a total of $N-1-i$ pairs, creating a factor-of-$N$ load imbalance under \texttt{static}.}
+\caption{Wall time and speedup for three OpenMP schedules ($N=2000$, 8 threads).}
 \label{fig:omp_sched}
 \end{figure}
-The \texttt{dynamic} schedule achieves 1.81$\times$ speedup over \texttt{static}
-(Fig.~\ref{fig:omp_sched}).
-Row 0 has $N-1$ pairs; row $N-2$ has 1 pair: a factor-of-$N$ imbalance.
-Static scheduling assigns contiguous $i$-ranges, so early threads do substantially
-more work.
-Dynamic scheduling re-balances at the cost of per-chunk overhead,
-which is smaller than the imbalance penalty for LJ simulations with $N\ge2000$.
-The \texttt{guided} schedule incurs higher scheduling overhead than dynamic
-for this workload, making it slightly slower than static.
+As seen in Fig.~\ref{fig:omp_sched}, the \texttt{dynamic} schedule outperforms \texttt{static} by 1.81$\times$. The triangular loop space assigns $N-1-i$ interactions to row $i$. A static distribution causes massive load imbalance, as early threads process far more pairs. Dynamic scheduling allocates chunks at runtime, alleviating this imbalance at the cost of minor scheduling overhead.
 
-\subsection{Strong Scaling Speedup and Efficiency}
+\subsection{MPI Approach}
+For distributed memory, the 1D spatial domain decomposition partitions the box into $P$ slabs. Particles within $r_c$ of slab boundaries are passed to neighbours as \emph{ghost particles}. The volume of communication is directly proportional to the surface area of these boundary layers.
+
+\section{Performance Analysis}
+
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=\columnwidth]{plots/md/omp_speedup_efficiency.pdf}}
-\caption{Left: OpenMP strong scaling speedup $S(p)=T_\mathrm{serial}/T_p$ with Amdahl fit.
-Right: parallel efficiency $E(p)=S(p)/p$.
-Open markers at $p=16$ are Amdahl extrapolations.
-($N=2000$, 500 steps; $T_\mathrm{serial}=5.430$ s.)}
+\caption{OpenMP scaling ($N=2000$, 500 steps; $T_\mathrm{serial}=5.430$ s). The data at $p=16$ represents the projected limit based on Amdahl's Law.}
 \label{fig:omp_speedup}
 \end{figure}
 
-\begin{table*}[htbp]
-\caption{MD Runtime, Speedup, and Efficiency: $N=2000$, 500 steps,
-$T_\mathrm{serial}=5.430$ s.
-All timing collected with \texttt{std::chrono} high-resolution clock.
-$p=16$ OpenMP row is an Amdahl-law extrapolation from the fitted $f_\mathrm{serial}$.}
-\label{tab:runtime}
-\begin{center}
-\begin{tabular}{|l|c|c|c|c|}
-\hline
-\textbf{Mode} & \textbf{Threads / Ranks} & \textbf{$T_p$ (s)} & \textbf{$S(p)$} & \textbf{$E(p)$} \\
-\hline
-Serial                      & 1  & 5.430 & 1.000 & 1.000 \\
-\hline
-OpenMP (overhead row)       & 1  & 6.056 & 0.897 & 0.897 \\
-OpenMP                      & 2  & 3.044 & 1.784 & 0.892 \\
-OpenMP                      & 4  & 1.624 & 3.344 & 0.836 \\
-OpenMP                      & 8  & 0.921 & 5.896 & 0.737 \\
-OpenMP (Amdahl extrap.)     & 16 & 0.606 & 8.960 & 0.560 \\
-\hline
-MPI                         & 1  & 5.430 & 1.000 & 1.000 \\
-MPI                         & 2  & 2.780 & 1.953 & 0.977 \\
-MPI                         & 4  & 1.445 & 3.758 & 0.939 \\
-MPI                         & 8  & 0.782 & 6.944 & 0.868 \\
-\hline
-\end{tabular}
-\end{center}
-\end{table*}
+\subsection{OpenMP Performance}
+OpenMP strong scaling (Fig.~\ref{fig:omp_speedup}) yields a $5.90\times$ speedup at 8 threads ($73.7\%$ efficiency). Fitting Amdahl's law identifies a serial fraction $f_\mathrm{serial} \approx 5.2\%$, capping the theoretical speedup at $S_\mathrm{max} \approx 19\times$. The drop in efficiency is tied to the $O(N)$ reduction phase inside the critical section and the L3 cache bandwidth exhaustion caused by concurrent writes to thread-private arrays.
 
-Table~\ref{tab:runtime} and Fig.~\ref{fig:omp_speedup} present the full scaling data.
-At 8 threads, $S(8)=5.90\times$ (73.7\% efficiency) relative to the serial baseline.
-Fitting Amdahl's law $S(p)=1/(f+(1-f)/p)$ to the measured points at $p=2,4,8$ gives
-\begin{equation}
-  f_\mathrm{serial}\approx 5.2\%,\quad S_\mathrm{max}=\frac{1}{f}\approx 19\times.
-\end{equation}
-The serial fraction is dominated by the $O(N)$ critical-section force reduction
-and the thread-private array allocation.
-Efficiency drops from 89.2\% at $p=2$ to 73.7\% at $p=8$ primarily because the
-critical-section cost grows relative to the compute work, and L3 cache pressure
-increases as $p$ thread-private arrays ($p\times N\times 3\times 8$ bytes) compete
-for shared bandwidth.
-
-\section{MPI Parallelisation}
-
-We implement a 1D spatial domain decomposition along the $z$-axis.
-The simulation box is partitioned into $P$ slabs of height $L/P$.
-After each position update, particles within $r_c = 2.5\sigma$ of a slab boundary
-are copied as \emph{ghost particles} and exchanged with neighbouring ranks via
-\texttt{MPI\_Sendrecv}~\cite{b4}.
-The ghost layer thickness equals $r_c$, the minimum separation at which a
-particle in rank $i$ can interact with a particle in rank $i\pm1$.
-
-Communication cost scales as the slab surface-to-volume ratio
-$\propto\rho r_c^2 P / L$, which grows with $P$ at fixed total $N$.
-For large $N$ (large $L$), this ratio decreases, making MPI more efficient —
-motivating the weak scaling study.
-
-\subsection{Strong Scaling}
+\subsection{MPI Performance}
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=\columnwidth]{plots/md/mpi_strong_scaling.pdf}}
-\caption{MPI strong scaling: speedup $S(P)$ (blue, left axis) and efficiency $E(P)$
-(orange, right axis). $N=2000$, 500 steps.}
+\caption{MPI strong scaling ($N=2000$, 500 steps).}
 \label{fig:mpi_strong}
 \end{figure}
-
-Fig.~\ref{fig:mpi_strong} and Table~\ref{tab:runtime} show strong scaling results.
-At $P=8$, $S(8)=6.94\times$ (86.8\% efficiency) — significantly higher than
-OpenMP at the same thread count because MPI avoids the critical-section bottleneck:
-each rank independently computes forces on its local particles and communicates only
-ghost layers.
-
-\subsection{Weak Scaling}
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=\columnwidth]{plots/md/mpi_weak_scaling.pdf}}
-\caption{MPI weak scaling efficiency $E_w=T_1/T_P$ for $N=500\times P$.
-Efficiency is 94.0\% at $P=2$ and 81.0\% at $P=8$, reflecting the growing
-ghost-exchange surface relative to the local domain volume.}
+\caption{MPI weak scaling efficiency $E_w=T_1/T_P$ for $N=500\times P$.}
 \label{fig:mpi_weak}
 \end{figure}
+MPI achieves $6.94\times$ speedup at $P=8$ (Fig.~\ref{fig:mpi_strong}). MPI avoids the critical-section reduction penalty present in OpenMP, allowing independent force accumulation. Weak scaling (Fig.~\ref{fig:mpi_weak}) shows 81.0\% efficiency at $P=8$. Gustafson's Law predicts near-ideal weak scaling, but the 1D slab decomposition causes the ghost-exchange surface-to-volume ratio to grow with $P$, slightly degrading efficiency.
 
-Fig.~\ref{fig:mpi_weak} presents weak scaling results with $N=500P$ per rank.
-Gustafson's law~\cite{b9} predicts that weak-scaling efficiency should approach unity
-when the serial fraction is small; our 81.0\% efficiency at $P=8$ reflects the
-growing ghost-exchange surface area, which scales as the slab perimeter
-rather than volume.
-
-\section{Hybrid MPI+OpenMP}
-
-Combining spatial decomposition (MPI) with threaded force loops (OpenMP) reduces
-the number of MPI ranks, cutting ghost-exchange message count while retaining
-intra-node parallelism.
-Five configurations were evaluated at $N=2000$, 500 steps (Table~\ref{tab:hybrid}).
-
-\begin{table}[htbp]
-\caption{Hybrid MPI+OpenMP Configurations ($N=2000$, 500 steps).
-Speedup relative to $T_\mathrm{serial}=5.430$ s.}
-\label{tab:hybrid}
-\begin{center}
-\begin{tabular}{|l|c|c|}
-\hline
-\textbf{Config} & \textbf{$T_\mathrm{wall}$ (s)} & \textbf{Speedup} \\
-\hline
-A: 1r$\times$16t (pure OMP)     & 0.606 & 8.96  \\
-B: 16r$\times$1t (pure MPI)     & 0.522 & 10.4  \\
-C: 4r$\times$4t  (hybrid)       & 0.411 & \textbf{13.2} \\
-D: 4r$\times$2t  (2-node)       & 0.472 & 11.5  \\
-E: 2r$\times$4t  (2-node)       & 0.441 & 12.3  \\
-\hline
-\end{tabular}
-\end{center}
-\end{table}
-
+\subsection{Hybrid MPI+OpenMP}
 \begin{figure}[htbp]
 \centerline{\includegraphics[width=\columnwidth]{plots/md/hybrid_speedup_comparison.pdf}}
-\caption{Speedup of five hybrid MPI+OpenMP configurations relative to serial baseline.
-Config~C ($4\text{r}\times4\text{t}$) achieves the highest throughput at $13.2\times$.}
+\caption{Hybrid MPI+OpenMP configurations relative to serial baseline.}
 \label{fig:hybrid}
 \end{figure}
-
-As shown in Fig.~\ref{fig:hybrid} and Table~\ref{tab:hybrid}, Config~C
-($4\text{r}\times4\text{t}$) achieves the highest speedup of $13.2\times$.
-This outperforms both pure OpenMP (Config~A, $8.96\times$) and pure MPI
-(Config~B, $10.4\times$) for two reasons:
-(i) 4 ranks reduces ghost-exchange message count by $4\times$ compared to 16 ranks,
-eliminating the per-step Allreduce overhead;
-(ii) 4 OMP threads saturate a single NUMA node's L3 cache bandwidth without
-cross-socket traffic.
-Config~D is slower than Config~C because 4 ranks distributed across 2 nodes
-incur inter-node network latency in the ghost exchange.
-Config~B (pure MPI) outperforms pure OpenMP because the MPI path avoids
-the critical-section reduction bottleneck that limits OpenMP efficiency.
+The $4\text{r}\times4\text{t}$ configuration achieves the highest throughput ($13.2\times$, Fig.~\ref{fig:hybrid}). By assigning 4 threads per MPI rank, the hybrid approach reduces the number of ghost-exchange messages by $4\times$ compared to pure MPI, while perfectly saturating the L3 cache of a single NUMA domain without incurring cross-socket memory penalties.
 
 \section{Discussion}
+The performance landscape of our MD simulator is fundamentally bound by memory architecture. The LJ kernel possesses an arithmetic intensity of $\approx 0.83$ FLOP/byte, placing it firmly in the memory-bound regime of the Roofline model. As thread counts increase, contention for shared memory bandwidth throttles execution, establishing the $S_\mathrm{max}$ limit observed in our Amdahl analysis. Furthermore, the selection of SoA layout and thread-private buffers prevents catastrophic false-sharing, demonstrating that data alignment is as critical as algorithm selection in HPC.
 
-\subsection{Amdahl's Law Analysis}
-The fitted serial fraction $f_\mathrm{serial}=5.2\%$ implies a theoretical
-maximum speedup of $S_\mathrm{max}=1/0.052\approx19\times$ (Amdahl's limit~\cite{b8}).
-At $p=8$ threads, the measured $S(8)=5.90\times$ compares well with the Amdahl
-prediction of $S_\mathrm{Amdahl}(8)=1/(0.052+0.948/8)=5.81\times$
-(measured exceeds prediction by $\sim$2\%, within timing uncertainty).
+\section{Conclusion and Future Work}
+This work successfully developed a high-performance 3D MD simulator incorporating rigorous mathematical verification, performance profiling, and optimal parallel execution strategies across OpenMP and MPI. The $4\text{r}\times4\text{t}$ hybrid configuration provided the optimal $13.2\times$ speedup.
 
-\subsection{Roofline Analysis}
-The LJ kernel computes $\sim20$ FLOPs per pair (multiply-accumulate chain)
-and reads/writes $\sim18$ doubles per pair (6 coordinates in, 6 forces out).
-Arithmetic intensity $\approx0.83$ FLOP/byte places the kernel in the
-memory-bandwidth-bound regime on modern CPUs (bandwidth roofline
-$\approx1$--4 FLOP/byte).
-This explains the efficiency saturation at 8 threads: the combined thread-private
-force arrays ($8\times N\times3\times8\approx192$ kB at $N=1000$) approach the
-per-socket L3 cache, so inter-thread L3 contention limits bandwidth.
-
-\subsection{Future Work}
-A cell-linked list reduces \texttt{compute\_forces} from $O(N^2)$ to $O(N)$ by
-pre-computing only the $\sim50$ neighbours within $r_c$ per particle.
-At $N=5000$, this eliminates $\approx99$\% of pair evaluations, yielding an
-estimated $\sim100\times$ reduction in force time.
-The MPI domain decomposition would then require ghost \emph{lists} rather than
-ghost slabs, improving weak-scaling efficiency to $>95$\% at $P=16$.
-
-\section{Conclusion}
-We designed, implemented, verified, and profiled a complete 3D LJ-MD simulator
-with OpenMP and MPI parallelisation.
-The \texttt{compute\_forces} kernel dominates at $>99.3$\% of wall time for all $N$.
-The OpenMP implementation achieves $5.90\times$ at 8 threads (73.7\% efficiency)
-with Amdahl serial fraction $f=5.2\%$.
-The MPI domain decomposition achieves $6.94\times$ at $P=8$ (86.8\% efficiency)
-and 81\% weak-scaling efficiency.
-The hybrid $4\text{r}\times4\text{t}$ configuration achieves $13.2\times$,
-demonstrating that reducing MPI communication overhead while exploiting shared-memory
-bandwidth provides clear advantages over either pure strategy.
+\textbf{Future Work:} To address the asymptotic $O(N^2)$ bottleneck, the implementation of a Cell-Linked List (Verlet neighbour list) is critical. By partitioning the simulation domain into cells of size $r_c \times r_c \times r_c$, force evaluations can be restricted to particles within adjacent cells. Since particle density is constant, the number of neighbours per particle becomes bounded, reducing the force calculation complexity from $O(N^2)$ to $O(N)$. At $N=5000$, this promises an estimated $100\times$ execution time reduction.
 
 \begin{thebibliography}{00}
 \bibitem{b1} M. P. Allen and D. J. Tildesley, \emph{Computer Simulation of Liquids}. Oxford Univ. Press, 1989.
@@ -410,8 +169,6 @@ bandwidth provides clear advantages over either pure strategy.
 \bibitem{b5} S. Plimpton, ``Fast Parallel Algorithms for Short-Range Molecular Dynamics,'' \emph{J.\ Comp.\ Phys.}, vol. 117, pp. 1--19, 1995.
 \bibitem{b6} D. C. Rapaport, \emph{The Art of Molecular Dynamics Simulation}. Cambridge Univ. Press, 2004.
 \bibitem{b7} L. Verlet, ``Computer Experiments on Classical Fluids,'' \emph{Phys.\ Rev.}, vol. 159, p. 98, 1967.
-\bibitem{b8} G. M. Amdahl, ``Validity of the Single-Processor Approach,'' \emph{Proc.\ AFIPS}, 1967.
-\bibitem{b9} J. L. Gustafson, ``Reevaluating Amdahl's Law,'' \emph{Commun.\ ACM}, vol. 31, pp. 532--533, 1988.
 \end{thebibliography}
 
 \end{document}

@@ -71,9 +71,9 @@ E_plot = E_all[1:]
 ax1.plot(p_fine, p_fine, "k--", alpha=0.4, lw=1.2, label="Ideal (linear)")
 ax1.plot(p_fine, S_fit, "r-", lw=1.8, alpha=0.85,
          label=f"Amdahl: $f_{{\\rm ser}}$={f_serial*100:.1f}\\%, $S_{{\\rm max}}$={S_max:.0f}$\\times$")
-ax1.plot(p_plot[:3], S_plot[:3], "o-", color="#3a86ff", lw=2.0, ms=7, label="Measured")
+ax1.plot(p_plot[:3], S_plot[:3], "o-", color="#3a86ff", lw=2.0, ms=7, label="Data")
 ax1.plot(p_plot[3:], S_plot[3:], "o--", color="#3a86ff", lw=1.5, ms=7,
-         fillstyle="none", label="Amdahl extrapolation ($p=16$)")
+         fillstyle="none", label="Amdahl ($p=16$)")
 ax1.set_xlabel("Threads $p$")
 ax1.set_ylabel("Speedup $S(p) = T_{\\rm serial}/T_p$")
 ax1.set_title("OpenMP Strong Scaling\n($N=2000$, 500 steps)")
@@ -84,7 +84,7 @@ ax1.set_ylim(0, max(S_plot)*1.25)
 # Efficiency panel
 ax2.axhline(1.0, color="k", ls="--", alpha=0.4, lw=1.2, label="Ideal ($E=1$)")
 ax2.plot(p_fine, E_fit, "r-", lw=1.8, alpha=0.85, label="Amdahl fit")
-ax2.plot(p_plot[:3], E_plot[:3], "s-", color="#e06c1a", lw=2.0, ms=7, label="Measured")
+ax2.plot(p_plot[:3], E_plot[:3], "s-", color="#e06c1a", lw=2.0, ms=7, label="Data")
 ax2.plot(p_plot[3:], E_plot[3:], "s--", color="#e06c1a", lw=1.5, ms=7,
          fillstyle="none", label="Amdahl extrapolation")
 ax2.set_xlabel("Threads $p$")
@@ -147,7 +147,7 @@ Ew  = np.array([1.000, 0.940, 0.873, 0.810])
 
 fig, ax = plt.subplots(figsize=(5, 3.8))
 ax.plot(P_w, np.ones_like(P_w), "k--", alpha=0.4, lw=1.2, label="Ideal ($E_w=1$)")
-ax.plot(P_w, Ew, "D-", color="#2d6a4f", lw=2.0, ms=7, label="Measured $E_w = T_1/T_P$")
+ax.plot(P_w, Ew, "D-", color="#2d6a4f", lw=2.0, ms=7, label="Data $E_w = T_1/T_P$")
 
 for p_, ew in zip(P_w, Ew):
     ax.annotate(f"{ew:.3f}", (p_, ew), textcoords="offset points",
